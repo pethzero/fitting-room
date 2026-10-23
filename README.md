@@ -6,6 +6,45 @@ picked while the game keeps scoring the armour you actually have on.
 
 https://www.nexusmods.com/skyrimspecialedition/mods/185342
 
+## This fork: Skyrim SE 1.5.97 (RaceMenu SE 0.4.16)
+
+This branch (`se-1.5.97`) is a fork of Fitting Room 1.2.0 that turns the
+**Overlays**, **Skin** and **Shape** pages back on for **Skyrim Special Edition
+1.5.97**.
+
+On 1.5.97 the newest RaceMenu is **RaceMenu SE 0.4.16** (skee64.dll 4.0.0.0,
+October 2020). Its C++ interfaces are older and laid out differently from the
+ones Fitting Room is written against (Overlay v1, Override v1, NiTransform v2,
+ActorUpdateManager v0), so upstream Fitting Room switches those three pages off
+with "the skee64.dll that loaded is older than this page was built for".
+
+What this branch does:
+
+* On exactly that RaceMenu, the three pages call RaceMenu's own **NiOverride
+  Papyrus natives** (`AddNodeOverrideString`, `AddOverrideString`,
+  `AddNodeTransformScale`, ...) directly from C++ instead of the newer
+  interfaces. RaceMenu stores the values itself, so they save and load like
+  anything RaceMenu wrote. See [src/NiOverrideLegacy.h](src/NiOverrideLegacy.h).
+* Each native is found by name, its parameter count checked, and only called
+  if it points into skee64.dll. If anything does not match, the page stays off
+  with the original message instead of calling the wrong code.
+* Measured against RaceMenu's source at
+  [expired6978/SKSE64Plugins 87a5cad](https://github.com/expired6978/SKSE64Plugins/commit/87a5cadd5c282e790ea6e9cf104bb7aa551fc4dc)
+  (the commit 0.4.16 was built from) and the shipped skee64.dll.
+* AE / newer RaceMenu builds are unchanged and use the original code path.
+
+Known differences on 1.5.97:
+
+* RaceMenu 0.4.16 has no overlay install callback, so the automatic repair of
+  body overlays after RaceMenu's post-load pass (OverlayReconcile) does not run.
+* When a new piece of armour is put on, the skin changer re-applies all of the
+  actor's armour overrides rather than just that piece's (0.4.16 has no
+  per-piece native). The result is the same.
+
+Build with `build.bat` (Visual Studio 2022 or newer, vcpkg at `VCPKG_ROOT`).
+The DLL and its data land in `build\deploy`; copy that into your Fitting Room
+mod folder, or run `build.bat release "<MO2>\mods\Fitting Room"`.
+
 ## Requirements
 
 * [CMake](https://cmake.org/)
