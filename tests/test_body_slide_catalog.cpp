@@ -1,4 +1,5 @@
 #include "BodySlideCatalog.h"
+#include "PathText.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -297,6 +298,45 @@ int main() {
         CHECK(row->outputMesh.empty());
 
         std::filesystem::remove_all(orphanRoot, ec);
+    }
+
+    // ---- a preset file whose NAME the code page cannot carry --------------
+    //
+    // ⚠⚠ THE FIELD CRASH OF 2026-10-23. "The Modern Scrolls Full Version 3.9"
+    // ships SliderPresets\DemoFace 3 - <Korean> 2.0 <Korean>.xml. Korean has no
+    // mapping in code page 1252, path::string() threw std::system_error on that
+    // name, and on the scan worker that was a fail-fast with no crash log. The
+    // scan must read past it, and the preset INSIDE it must still be found.
+    {
+        const auto koreanRoot = std::filesystem::current_path() / "body-slide-catalog-korean-tmp";
+        std::filesystem::remove_all(koreanRoot, ec);
+        Write(koreanRoot / "SliderSets/body.osp", R"(<SliderSetInfo><SliderSet name="UBE Body"><OutputPath>meshes\actors\character\character assets</OutputPath><OutputFile GenWeights="true">femalebody</OutputFile><Slider name="Waist"><Data/></Slider></SliderSet></SliderSetInfo>)");
+        Write(koreanRoot / std::filesystem::path(u8"SliderPresets/DemoFace 3 - \uC138\uD0C0 2.0 \uAE30\uBCF8\uBC14\uB514.xml"),
+              R"(<SliderPresets><Preset name="Korean File" set="UBE Body"><Group name="UBE"/><SetSlider name="Waist" size="big" value="50"/></Preset></SliderPresets>)");
+        Write(koreanRoot / std::filesystem::path(u8"SliderSets/\uC138\uD0C0 \uBC14\uB514.osp"),
+              R"(<SliderSetInfo><SliderSet name="Korean Set"><Slider name="Waist"><Data/></Slider></SliderSet></SliderSetInfo>)");
+
+        bool threw = false;
+        BodySlideCatalogSnapshot korean;
+        try {
+            korean = ScanBodySlideCatalog(koreanRoot, { "Korean File" });
+        } catch (...) {
+            threw = true;
+        }
+        CHECK(!threw);
+        CHECK(korean.presetFilesScanned == 1);
+        CHECK(korean.Find("Korean File") != nullptr);
+        CHECK(korean.Find("Korean File") && korean.Find("Korean File")->authorable);
+        // A project the code page cannot name is left out of projectForSet
+        // rather than stored as text that would open the wrong file. Only
+        // asserted where the code page really cannot carry Korean; a Korean
+        // Windows can, and there the project is rightly kept.
+        if (!PathText::Native(std::filesystem::path(u8"\uC138\uD0C0"))) {
+            CHECK(!korean.projectForSet.contains("Korean Set"));
+        }
+        CHECK(korean.projectForSet.contains("UBE Body"));
+
+        std::filesystem::remove_all(koreanRoot, ec);
     }
     if (!failures) std::cout << "BodySlideCatalogTests: all passed\n";
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;

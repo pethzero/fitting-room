@@ -1,5 +1,7 @@
 #include "BodyMorphCatalog.h"
 
+#include "PathText.h"  // path text that cannot throw on a Unicode name
+#include "WorkerGuard.h"  // the worker's body must not end the process
 #include "BodyMorphTri.h"  // the built meshes' own morph names, the real filter
 
 #include <algorithm>
@@ -84,10 +86,10 @@ namespace OS::BodyMorphCatalog {
                     continue;
                 }
                 const auto& path = it->path();
-                if (Lower(path.extension().string()) != a_extension) {
+                if (Lower(PathText::Narrow(path.extension())) != a_extension) {
                     continue;
                 }
-                const auto parent = path.parent_path().filename().string();
+                const auto parent = PathText::Narrow(path.parent_path().filename());
                 if (Lower(parent) == wanted) {
                     out.push_back(path);
                 }
@@ -99,7 +101,7 @@ namespace OS::BodyMorphCatalog {
             // sorting here is what puts the body's own headings above a
             // neighbour's.
             std::ranges::sort(out, [](const auto& a, const auto& b) {
-                return Lower(a.filename().string()) < Lower(b.filename().string());
+                return Lower(PathText::Narrow(a.filename())) < Lower(PathText::Narrow(b.filename()));
             });
             return out;
         }
@@ -140,7 +142,7 @@ namespace OS::BodyMorphCatalog {
             // conversions into one file read on a normal install.
             const auto wanted = Lower(a_setName) + ".osp";
             for (const auto& path : projects) {
-                if (Lower(path.filename().string()) != wanted) {
+                if (Lower(PathText::Narrow(path.filename())) != wanted) {
                     continue;
                 }
                 std::string text;
@@ -318,17 +320,27 @@ namespace OS::BodyMorphCatalog {
         g_active.fetch_add(1, std::memory_order_acq_rel);
         std::thread([requested, preset = std::move(a_presetName),
                      worn = std::move(a_wornMeshes)]() mutable {
-            auto next = ScanRoot("Data/CalienteTools", preset, "Data/meshes", worn);
-            next.generation = requested;
-            spdlog::info("BodyMorphCatalog: {}", next.diagnostic);
-            // Switching subject mid-scan requests a different preset. Only the
-            // newest request may publish, or a late scan for the character you
-            // just left replaces the one you are looking at.
-            if (g_generation.load(std::memory_order_acquire) == requested) {
-                g_snapshot.store(std::make_shared<const Snapshot>(std::move(next)),
-                                 std::memory_order_release);
-            }
-            g_active.fetch_sub(1, std::memory_order_acq_rel);
+            // ⚠⚠ GUARDED, AND THIS WORKER WAS THE ONE THAT WASN'T. Field
+            // 2026-10-23: an exception escaping this lambda (a Unicode name
+            // under Data/CalienteTools, see PathText.h) was std::terminate, a
+            // fail-fast with no crash log, twice in one evening on opening the
+            // Bodies page. The active count is a destructor's job so a throw
+            // cannot leave Scanning() true for the rest of the session.
+            struct ActiveGuard {
+                ~ActiveGuard() { g_active.fetch_sub(1, std::memory_order_acq_rel); }
+            } activeGuard;
+            WorkerGuard::Run("BodyMorphCatalog", [&] {
+                auto next = ScanRoot("Data/CalienteTools", preset, "Data/meshes", worn);
+                next.generation = requested;
+                spdlog::info("BodyMorphCatalog: {}", next.diagnostic);
+                // Switching subject mid-scan requests a different preset. Only the
+                // newest request may publish, or a late scan for the character you
+                // just left replaces the one you are looking at.
+                if (g_generation.load(std::memory_order_acquire) == requested) {
+                    g_snapshot.store(std::make_shared<const Snapshot>(std::move(next)),
+                                     std::memory_order_release);
+                }
+            });
         }).detach();
     }
 

@@ -1,5 +1,6 @@
 #include "BodySlideCatalog.h"
 
+#include "PathText.h"  // path text that cannot throw on a Unicode name
 #include "BodyMeshPath.h"
 
 #include <tinyxml2.h>
@@ -274,7 +275,7 @@ namespace OS {
                     ec.clear();
                     continue;
                 }
-                const auto ext = Lower(it->path().extension().string());
+                const auto ext = Lower(PathText::Narrow(it->path().extension()));
                 if (std::ranges::any_of(a_extensions, [&](std::string_view a_want) {
                         return ext == a_want;
                     })) {
@@ -340,7 +341,7 @@ namespace OS {
                     ++a_out.rejectedFiles;
                     continue;
                 }
-                const BodyFamily hint = FamilyFromSignature(path.stem().string());
+                const BodyFamily hint = FamilyFromSignature(PathText::Narrow(path.stem()));
                 for (auto* category = root->FirstChildElement("Category"); category;
                      category = category->NextSiblingElement("Category")) {
                     const char* categoryName = category->Attribute("name");
@@ -411,14 +412,14 @@ namespace OS {
                         spdlog::debug(
                             "BodySlide: '{}' skipped a preset with no name or an "
                             "empty set.",
-                            path.filename().string());
+                            PathText::Narrow(path.filename()));
                         continue;
                     }
                     if (std::string_view(name).size() > kMaxNameBytes ||
                         std::string_view(set).size() > kMaxNameBytes) {
                         ++a_out.drops.oversizeName;
                         spdlog::warn("BodySlide: preset name or set over {} bytes in '{}'.",
-                                     kMaxNameBytes, path.filename().string());
+                                     kMaxNameBytes, PathText::Narrow(path.filename()));
                         continue;
                     }
                     if (!a_allowed.empty() && !a_allowed.contains(name)) {
@@ -483,7 +484,7 @@ namespace OS {
                         spdlog::warn(
                             "BodySlide: preset '{}' in '{}' has a slider row that "
                             "would not parse; skipped.",
-                            preset.name, path.filename().string());
+                            preset.name, PathText::Narrow(path.filename()));
                         continue;
                     }
                     a_presets[preset.name].push_back(std::move(preset));
@@ -619,7 +620,13 @@ namespace OS {
                     // Recorded for EVERY set, before the installed-preset
                     // filter below, so a set only custom presets use can still
                     // be found. First file wins; see the header.
-                    a_out.projectForSet.emplace(setName, path.string());
+                    // ⚠ Native, NOT Narrow: this string is opened as a path
+                    // again later (BodyCardScene), so a name the code page
+                    // cannot carry is left out rather than stored as text that
+                    // names the wrong file or throws on the way back in.
+                    if (auto native = PathText::Native(path)) {
+                        a_out.projectForSet.emplace(setName, std::move(*native));
+                    }
                     // ⚠ RECORDED FOR EVERY SET TOO, and for the same reason
                     // projectForSet is: the covered sibling of a body set
                     // usually has NO installed preset, so everything below the
@@ -1023,18 +1030,47 @@ namespace OS {
         const auto requested = generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
         activeScans_.fetch_add(1, std::memory_order_acq_rel);
         std::thread([this, requested, names = std::move(a_allowedPresetNames)]() mutable {
-            auto next = ScanBodySlideCatalog(
-                "Data/CalienteTools/BodySlide", names);
-            next.generation = requested;
-            // Target switches can request a different sex while the previous
-            // filesystem walk is still running. Only the newest request may
-            // publish, so a late female scan cannot replace the male list.
-            if (generation_.load(std::memory_order_acquire) == requested) {
-                snapshot_.store(
-                    std::make_shared<const BodySlideCatalogSnapshot>(std::move(next)),
-                    std::memory_order_release);
+            // ⚠⚠ GUARDED, for the reason BodyMorphCatalog::RequestScan's
+            // worker now is: the same tree, the same Unicode names, the same
+            // fail-fast with no crash log if anything escapes. The active count
+            // is a destructor's job so a throw cannot leave Scanning() stuck.
+            struct ActiveGuard {
+                std::atomic<std::uint32_t>& count;
+                ~ActiveGuard() { count.fetch_sub(1, std::memory_order_acq_rel); }
+            } activeGuard{ activeScans_ };
+            // ⚠ WorkerGuard::Run's body written out, because this file is also
+            // built into BodySlideCatalogTests, which has spdlog and not the
+            // plugin's PCH that WorkerGuard.h pulls in.
+            try {
+                auto next = ScanBodySlideCatalog(
+                    "Data/CalienteTools/BodySlide", names);
+                next.generation = requested;
+                // Target switches can request a different sex while the previous
+                // filesystem walk is still running. Only the newest request may
+                // publish, so a late female scan cannot replace the male list.
+                if (generation_.load(std::memory_order_acquire) == requested) {
+                    snapshot_.store(
+                        std::make_shared<const BodySlideCatalogSnapshot>(std::move(next)),
+                        std::memory_order_release);
+                }
+            } catch (const std::exception& e) {
+                spdlog::critical(
+                    "BodySlideCatalog: a worker thread threw and was abandoned rather than "
+                    "allowed to end the process as a fail-fast with no crash log. The "
+                    "exception was: {}",
+                    e.what() ? e.what() : "a std::exception with no message");
+                if (const auto logger = spdlog::default_logger()) {
+                    logger->flush();
+                }
+            } catch (...) {
+                spdlog::critical(
+                    "BodySlideCatalog: a worker thread threw something that does not derive "
+                    "from std::exception and was abandoned rather than allowed to end the "
+                    "process.");
+                if (const auto logger = spdlog::default_logger()) {
+                    logger->flush();
+                }
             }
-            activeScans_.fetch_sub(1, std::memory_order_acq_rel);
         }).detach();
     }
 

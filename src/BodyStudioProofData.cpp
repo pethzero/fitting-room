@@ -1,5 +1,7 @@
 #include "BodyStudioProofData.h"
 
+#include "PathText.h"  // path text that cannot throw on a Unicode name
+
 #include <tinyxml2.h>
 
 #include <algorithm>
@@ -71,7 +73,7 @@ namespace OS::BodyStudioProofData {
         }
 
         [[nodiscard]] bool IsXml(const std::filesystem::path& a_path) {
-            return Lower(a_path.extension().string()) == ".xml";
+            return Lower(PathText::Narrow(a_path.extension())) == ".xml";
         }
     }  // namespace
 
@@ -192,7 +194,7 @@ namespace OS::BodyStudioProofData {
         for (std::filesystem::directory_iterator it(a_root, ec), end; !ec && it != end;
              it.increment(ec)) {
             if (it->is_regular_file(ec) && !ec && IsXml(it->path()) &&
-                !IsClothed(it->path().filename().string())) {
+                !IsClothed(PathText::Narrow(it->path().filename()))) {
                 files.push_back(it->path());
             }
         }

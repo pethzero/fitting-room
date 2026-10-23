@@ -242,6 +242,7 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/NodeTransformApi.cpp
         src/BodyMorphCatalogParse.h
         src/BodyMorphCatalog.h
+        src/PathText.h
         src/BodyMorphCatalog.cpp
         src/BodyMorphPresets.h
         src/BodyMorphPresets.cpp
