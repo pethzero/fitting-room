@@ -250,6 +250,8 @@ add_commonlibsse_plugin(${PROJECT_NAME}
         src/OverlayPlan.h
         src/OverlayApi.h
         src/OverlayApi.cpp
+        src/NiOverrideLegacy.h
+        src/NiOverrideLegacy.cpp
         src/OverlayLocations.h
         src/OverlayLocations.cpp
         src/PaintScrape.h

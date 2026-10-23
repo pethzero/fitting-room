@@ -70,6 +70,11 @@ namespace OS::NodeTransformApi {
     // kPostLoad silently gets nothing.
     void Request();
 
+    // RaceMenu SE 0.4.16 (Skyrim SE 1.5.97) only: finish what Request started
+    // by resolving NiOverride's Papyrus natives, which need the VM. Call at
+    // kDataLoaded. A no-op on any other skee.
+    void ResolveLegacy();
+
     [[nodiscard]] bool          Available();
     [[nodiscard]] std::uint32_t Version();
     [[nodiscard]] Status        GetStatus();

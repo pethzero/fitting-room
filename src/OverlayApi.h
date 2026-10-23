@@ -52,6 +52,11 @@ namespace OS::OverlayApi {
     // earlier, and requesting from kPostLoad silently gets nothing.
     void Request();
 
+    // RaceMenu SE 0.4.16 (Skyrim SE 1.5.97) only: finish what Request started
+    // by resolving NiOverride's Papyrus natives, which need the VM. Call at
+    // kDataLoaded, before RegisterInstallCallback. A no-op on any other skee.
+    void ResolveLegacy();
+
     [[nodiscard]] Status        GetStatus();
     [[nodiscard]] bool          Available();
     [[nodiscard]] std::uint32_t OverlayVersion();
