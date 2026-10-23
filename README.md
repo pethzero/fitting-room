@@ -41,6 +41,14 @@ Known differences on 1.5.97:
   actor's armour overrides rather than just that piece's (0.4.16 has no
   per-piece native). The result is the same.
 
+Fixes on top of upstream 1.2.0 (all runtimes):
+
+* **1.1:** opening the Bodies page no longer kills the game when a mod ships a
+  BodySlide file whose name your Windows code page cannot represent (for
+  example the Korean-named presets in *The Modern Scrolls*). The scan used to
+  throw on that name in a background thread, which ended the game with no
+  crash log (ucrtbase `0xC0000409`); it now reads past it.
+
 Build with `build.bat` (Visual Studio 2022 or newer, vcpkg at `VCPKG_ROOT`).
 The DLL and its data land in `build\deploy`; copy that into your Fitting Room
 mod folder, or run `build.bat release "<MO2>\mods\Fitting Room"`.
