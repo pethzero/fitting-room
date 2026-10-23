@@ -1,5 +1,7 @@
 #include "NodeTransformApi.h"
 
+#include "NiOverrideLegacy.h"  // RaceMenu SE 0.4.16: NiTransform v2 goes through NiOverride
+
 #include <cstdint>
 
 // RaceMenu's public modder header uses opaque global Skyrim type declarations.
@@ -13,6 +15,13 @@ namespace OS::NodeTransformApi {
     namespace {
 
         INiTransformInterface* g_transforms{ nullptr };
+
+        // ⚠⚠ RaceMenu SE 0.4.16 ANSWERS WITH NiTransform v2, whose vtable is
+        // skee's implementation class (Save/Load in the middle, SKEEFixedString
+        // and std::function parameters), not v3 of the header's. While this is
+        // set nothing past GetVersion is called on g_transforms; every call
+        // goes to NiOverride's natives through NiOverrideLegacy instead.
+        bool g_legacy{ false };
 
         [[nodiscard]] TESObjectREFR* AsRaceMenuRef(RE::Actor* a_actor) {
             return reinterpret_cast<TESObjectREFR*>(a_actor);
@@ -30,6 +39,54 @@ namespace OS::NodeTransformApi {
         [[nodiscard]] bool IsFemaleActor(RE::Actor* a_actor) {
             auto* const base = a_actor ? a_actor->GetActorBase() : nullptr;
             return base && base->IsFemale();
+        }
+
+        // ---- one call per operation, whichever skee answered ----------------
+
+        void AddScale(RE::Actor* a_actor, bool a_female, const char* a_bone, float a_scale) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddNodeTransformScale(a_actor, kThirdPerson, a_female, a_bone,
+                                                        ShapeOverlay::kOwnedKey, a_scale);
+                return;
+            }
+            g_transforms->AddNodeTransformScale(AsRaceMenuRef(a_actor), kThirdPerson, a_female, a_bone,
+                                                ShapeOverlay::kOwnedKey, a_scale);
+        }
+
+        void RemoveScale(RE::Actor* a_actor, bool a_female, const char* a_bone) {
+            if (g_legacy) {
+                NiOverrideLegacy::RemoveNodeTransformScale(a_actor, kThirdPerson, a_female, a_bone,
+                                                           ShapeOverlay::kOwnedKey);
+                return;
+            }
+            g_transforms->RemoveNodeTransformScale(AsRaceMenuRef(a_actor), kThirdPerson, a_female, a_bone,
+                                                   ShapeOverlay::kOwnedKey);
+        }
+
+        [[nodiscard]] bool HasScale(RE::Actor* a_actor, bool a_female, const char* a_bone) {
+            if (g_legacy) {
+                return NiOverrideLegacy::HasNodeTransformScale(a_actor, kThirdPerson, a_female, a_bone,
+                                                               ShapeOverlay::kOwnedKey);
+            }
+            return g_transforms->HasNodeTransformScale(AsRaceMenuRef(a_actor), kThirdPerson, a_female,
+                                                       a_bone, ShapeOverlay::kOwnedKey);
+        }
+
+        [[nodiscard]] float GetScale(RE::Actor* a_actor, bool a_female, const char* a_bone) {
+            if (g_legacy) {
+                return NiOverrideLegacy::GetNodeTransformScale(a_actor, kThirdPerson, a_female, a_bone,
+                                                               ShapeOverlay::kOwnedKey);
+            }
+            return g_transforms->GetNodeTransformScale(AsRaceMenuRef(a_actor), kThirdPerson, a_female,
+                                                       a_bone, ShapeOverlay::kOwnedKey);
+        }
+
+        void UpdateAll(RE::Actor* a_actor) {
+            if (g_legacy) {
+                NiOverrideLegacy::UpdateAllReferenceTransforms(a_actor);
+                return;
+            }
+            g_transforms->UpdateNodeAllTransforms(AsRaceMenuRef(a_actor));
         }
 
     }  // namespace
@@ -68,6 +125,18 @@ namespace OS::NodeTransformApi {
             return;
         }
         const auto version = candidate->GetVersion();
+        // ⚠⚠ EXACTLY v2 IS RaceMenu SE 0.4.16 and is taken down the NiOverride
+        // road, resolved at kDataLoaded (the natives need the VM). Until then,
+        // and for good if that fails, the page keeps saying kTooOld.
+        if (version == 2) {
+            g_transforms     = candidate;
+            g_legacy         = true;
+            g_status         = Status::kTooOld;
+            g_refusedVersion = version;
+            spdlog::info("Shape: RaceMenu NiTransform v2 (RaceMenu SE 0.4.16). The page will go "
+                         "through NiOverride's natives instead; resolved at kDataLoaded.");
+            return;
+        }
         if (version < INiTransformInterface::kCurrentPluginVersion) {
             g_status         = Status::kTooOld;
             g_refusedVersion = version;
@@ -90,7 +159,24 @@ namespace OS::NodeTransformApi {
                      ShapeOverlay::kOwnedKey);
     }
 
-    bool Available() { return g_transforms != nullptr; }
+    void ResolveLegacy() {
+        if (!g_legacy || g_status == Status::kReady) {
+            return;
+        }
+        if (!NiOverrideLegacy::Resolve()) {
+            spdlog::error("Shape: RaceMenu SE 0.4.16's NiOverride natives could not be resolved, "
+                          "so the page stays off.");
+            return;
+        }
+        g_status         = Status::kReady;
+        g_refusedVersion = 0;
+        spdlog::info("Shape: ready through NiOverride (RaceMenu SE 0.4.16); owned key='{}'.",
+                     ShapeOverlay::kOwnedKey);
+    }
+
+    // ⚠ THE STATUS, NOT THE POINTER: on RaceMenu SE 0.4.16 the pointer is held
+    // from kPostPostLoad and the page is only usable once ResolveLegacy ran.
+    bool Available() { return g_transforms != nullptr && g_status == Status::kReady; }
 
     Status GetStatus() { return g_status; }
 
@@ -119,7 +205,7 @@ namespace OS::NodeTransformApi {
     ApplyResult Apply(RE::Actor*                                   a_actor,
                       const std::vector<ShapeOverlay::Adjustment>& a_plan) {
         ApplyResult result;
-        if (!g_transforms || !a_actor) {
+        if (!Available() || !a_actor) {
             return result;
         }
         result.available   = true;
@@ -149,8 +235,7 @@ namespace OS::NodeTransformApi {
             if (!actor || !g_transforms) {
                 return;
             }
-            auto* const  refr     = AsRaceMenuRef(actor);
-            const bool   isFemale = IsFemaleActor(actor);
+            const bool isFemale = IsFemaleActor(actor);
             for (const auto& adj : plan) {
                 if (adj.remove) {
                     // ⚠ REMOVE THE SCALE, NOT THE WHOLE NODE ENTRY.
@@ -159,20 +244,16 @@ namespace OS::NodeTransformApi {
                     // is all we write. It stops being the same thing the moment
                     // a position control is added, and this is the line nobody
                     // would think to revisit then.
-                    g_transforms->RemoveNodeTransformScale(refr, kThirdPerson, isFemale,
-                                                           adj.bone.c_str(),
-                                                           ShapeOverlay::kOwnedKey);
+                    RemoveScale(actor, isFemale, adj.bone.c_str());
                 } else {
-                    g_transforms->AddNodeTransformScale(refr, kThirdPerson, isFemale,
-                                                        adj.bone.c_str(),
-                                                        ShapeOverlay::kOwnedKey, adj.scale);
+                    AddScale(actor, isFemale, adj.bone.c_str(), adj.scale);
                 }
             }
             // ⚠ ONE UPDATE AFTER THE WHOLE BATCH, never one per bone. Same rule
             // RaceMenuMorphApi::ApplyOwned holds for its single refresh: the
             // per-item version costs a scenegraph walk for each of twenty bones
             // and shows the character mid-way through its own edit.
-            g_transforms->UpdateNodeAllTransforms(refr);
+            UpdateAll(actor);
         });
         result.refreshed = result.actorLoaded;
         return result;
@@ -197,11 +278,10 @@ namespace OS::NodeTransformApi {
 
     std::vector<ShapeOverlay::Reading> Read(RE::Actor* a_actor) {
         std::vector<ShapeOverlay::Reading> readings;
-        if (!g_transforms || !a_actor) {
+        if (!Available() || !a_actor) {
             return readings;
         }
-        auto* const  refr     = AsRaceMenuRef(a_actor);
-        const bool   isFemale = IsFemaleActor(a_actor);
+        const bool isFemale = IsFemaleActor(a_actor);
         readings.reserve(ShapeOverlay::kSliderCount * 2);
         for (const auto& slider : ShapeOverlay::kSliders) {
             for (const char* bone : slider.bones) {
@@ -215,11 +295,9 @@ namespace OS::NodeTransformApi {
                 // has to hand rather than a documented default, so reading it
                 // unguarded is how every unshaped character would come back
                 // holding a number.
-                r.present = g_transforms->HasNodeTransformScale(
-                    refr, kThirdPerson, isFemale, bone, ShapeOverlay::kOwnedKey);
+                r.present = HasScale(a_actor, isFemale, bone);
                 if (r.present) {
-                    r.scale = g_transforms->GetNodeTransformScale(
-                        refr, kThirdPerson, isFemale, bone, ShapeOverlay::kOwnedKey);
+                    r.scale = GetScale(a_actor, isFemale, bone);
                 }
                 readings.push_back(std::move(r));
             }

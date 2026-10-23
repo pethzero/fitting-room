@@ -54,6 +54,11 @@ namespace OS::SkinApi {
     // the attach observer. kPostPostLoad, beside OverlayApi::Request.
     void Request();
 
+    // RaceMenu SE 0.4.16 (Skyrim SE 1.5.97) only: finish what Request started
+    // by resolving NiOverride's Papyrus natives, which need the VM. Call at
+    // kDataLoaded. A no-op on any other skee.
+    void ResolveLegacy();
+
     [[nodiscard]] Status GetStatus();
     [[nodiscard]] bool   Available();
     // A translation key naming why the feature cannot work, for the page.

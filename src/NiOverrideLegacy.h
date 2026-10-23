@@ -4,6 +4,8 @@
 #include <string>
 
 namespace RE {
+    class TESObjectARMA;
+    class TESObjectARMO;
     class TESObjectREFR;
 }
 
@@ -52,15 +54,17 @@ namespace OS::NiOverrideLegacy {
     [[nodiscard]] std::uint32_t NumFeetOverlays();
     [[nodiscard]] std::uint32_t NumFaceOverlays();
 
-    // Node overrides. ⚠ persist is always true here: the override goes into
-    // skee's store (and the co-save) and is also applied to the node at once,
-    // which is what AddNodeOverride* does in 0.4.16 when the gender matches.
+    // Node overrides. ⚠ WHAT persist MEANS IN 0.4.16: true puts the override
+    // in skee's store (and the co-save) AND applies it to the node at once;
+    // false only applies it, which is IOverrideInterface::SetNodeProperty.
+    // Either way the apply only happens when a_female matches the actor's sex.
+    // The numeric writes always persist.
     [[nodiscard]] bool HasNodeOverride(RE::TESObjectREFR* a_refr, bool a_female,
                                        const char* a_node, std::uint32_t a_key,
                                        std::uint32_t a_index);
     void AddNodeOverrideString(RE::TESObjectREFR* a_refr, bool a_female, const char* a_node,
                                std::uint32_t a_key, std::uint32_t a_index,
-                               const std::string& a_value);
+                               const std::string& a_value, bool a_persist = true);
     void AddNodeOverrideInt(RE::TESObjectREFR* a_refr, bool a_female, const char* a_node,
                             std::uint32_t a_key, std::uint32_t a_index, std::uint32_t a_value);
     void AddNodeOverrideFloat(RE::TESObjectREFR* a_refr, bool a_female, const char* a_node,
@@ -84,5 +88,37 @@ namespace OS::NiOverrideLegacy {
     // Re-apply every node override the reference holds (deferred), the
     // counterpart of IOverrideInterface::SetNodeProperties(refr, false).
     void ApplyNodeOverrides(RE::TESObjectREFR* a_refr);
+
+    // Armour-addon overrides, the same contract as the node ones. ⚠ persist
+    // false is SetArmorProperty for BOTH persons at once: skee's
+    // SetArmorAddonProperty visits the first- and third-person addon alike.
+    [[nodiscard]] bool HasOverride(RE::TESObjectREFR* a_refr, bool a_female,
+                                   RE::TESObjectARMO* a_armor, RE::TESObjectARMA* a_addon,
+                                   const char* a_node, std::uint32_t a_key, std::uint32_t a_index);
+    void AddOverrideString(RE::TESObjectREFR* a_refr, bool a_female, RE::TESObjectARMO* a_armor,
+                           RE::TESObjectARMA* a_addon, const char* a_node, std::uint32_t a_key,
+                           std::uint32_t a_index, const std::string& a_value, bool a_persist);
+    void RemoveOverride(RE::TESObjectREFR* a_refr, bool a_female, RE::TESObjectARMO* a_armor,
+                        RE::TESObjectARMA* a_addon, const char* a_node, std::uint32_t a_key,
+                        std::uint32_t a_index);
+    // Re-apply every armour override the reference holds (deferred), the
+    // counterpart of SetArmorProperties(refr, false). ⚠ ALSO STANDS IN FOR
+    // ApplyArmorOverrides(one addon): 0.4.16 exposes no per-addon apply as a
+    // native, so a write at attach re-applies the whole actor, deferred.
+    void ApplyOverrides(RE::TESObjectREFR* a_refr);
+
+    // Node transform scale under a named key (NiTransform v2's natives).
+    [[nodiscard]] bool  HasNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson,
+                                              bool a_female, const char* a_node, const char* a_key);
+    void                AddNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson,
+                                              bool a_female, const char* a_node, const char* a_key,
+                                              float a_scale);
+    [[nodiscard]] float GetNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson,
+                                              bool a_female, const char* a_node, const char* a_key);
+    void                RemoveNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson,
+                                                 bool a_female, const char* a_node,
+                                                 const char* a_key);
+    // UpdateNodeAllTransforms(refr).
+    void UpdateAllReferenceTransforms(RE::TESObjectREFR* a_refr);
 
 }  // namespace OS::NiOverrideLegacy

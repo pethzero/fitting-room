@@ -1,6 +1,7 @@
 #include "SkinApi.h"
 
 #include "MakeupApi.h"   // the tone the head holds, for the seam probe
+#include "NiOverrideLegacy.h"  // RaceMenu SE 0.4.16: Override v1 goes through NiOverride
 #include "NpcIdentity.h"
 #include "OverlayPlan.h"  // Rgb, the tone probe's type
 #include "SkinPacks.h"
@@ -36,6 +37,31 @@ namespace OS::SkinApi {
         IOverrideInterface*  g_override{ nullptr };
         IActorUpdateManager* g_updates{ nullptr };
         Status               g_status{ Status::kNotRequested };
+
+        // ⚠⚠ RaceMenu SE 0.4.16 ANSWERS WITH Override v1 AND ActorUpdateManager
+        // v0, and neither vtable is the header's (see NiOverrideLegacy.h). While
+        // this is set nothing past GetVersion is called on g_override; every
+        // override goes to NiOverride's natives, and the observer goes in
+        // through LegacyActorUpdateManager below.
+        bool g_legacy{ false };
+
+        // ⚠⚠ 0.4.16's ActorUpdateManager, the six-slot primary vtable it
+        // ships with, and NOT IActorUpdateManager (whose AddInterface is slot
+        // 11). Declared by skee 87a5cad ActorUpdateManager.h as IPluginInterface
+        // first, then AddInterface, RemoveInterface, OnAttach. MEASURED on the
+        // shipped skee64.dll 4.0.0.0 by walking the vtable from its RTTI locator
+        // (offset 0): slot 1 is `xor eax,eax; ret` (GetVersion returns 0), slot
+        // 2 is `ret 0` (an empty Revert), slots 3 and 4 touch the observer
+        // vector at +0x228/+0x220, slot 5 is OnAttach, and the table ends there.
+        // Never constructed; only ever a view of skee's object.
+        class LegacyActorUpdateManager {
+        public:
+            virtual void     Slot00()                                              = 0;  // 00 dtor
+            virtual skee_u32 GetVersion()                                          = 0;  // 01
+            virtual void     Revert()                                              = 0;  // 02
+            virtual void     AddInterface(IAddonAttachmentInterface* a_observer)    = 0;  // 03
+            virtual void     RemoveInterface(IAddonAttachmentInterface* a_observer) = 0;  // 04
+        };
 
         // Which pack each actor wears and what was written for it. Read by the
         // attach observer on the game thread and by the page on the present
@@ -81,6 +107,142 @@ namespace OS::SkinApi {
         private:
             std::string m_value;
         };
+
+        // ---- one call per operation, whichever skee answered -----------------
+        //
+        // The index rule is skee's own on both roads (key 9's index is the
+        // texture slot), so every caller passes the slot it already passed.
+
+        [[nodiscard]] RE::TESObjectREFR* Eng(TESObjectREFR* a_refr) {
+            return reinterpret_cast<RE::TESObjectREFR*>(a_refr);
+        }
+        [[nodiscard]] RE::TESObjectARMO* Eng(TESObjectARMO* a_armor) {
+            return reinterpret_cast<RE::TESObjectARMO*>(a_armor);
+        }
+        [[nodiscard]] RE::TESObjectARMA* Eng(TESObjectARMA* a_addon) {
+            return reinterpret_cast<RE::TESObjectARMA*>(a_addon);
+        }
+
+        [[nodiscard]] bool HasArmor(TESObjectREFR* a_refr, bool a_female, TESObjectARMO* a_armor,
+                                    TESObjectARMA* a_addon, const char* a_node,
+                                    std::uint8_t a_slot) {
+            if (g_legacy) {
+                return NiOverrideLegacy::HasOverride(Eng(a_refr), a_female, Eng(a_armor),
+                                                     Eng(a_addon), a_node, kKeyTexture, a_slot);
+            }
+            return g_override->HasArmorOverride(a_refr, a_female, a_armor, a_addon, a_node,
+                                                kKeyTexture, a_slot);
+        }
+
+        void PutArmor(TESObjectREFR* a_refr, bool a_female, TESObjectARMO* a_armor,
+                      TESObjectARMA* a_addon, const char* a_node, std::uint8_t a_slot,
+                      const std::string& a_value) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddOverrideString(Eng(a_refr), a_female, Eng(a_armor),
+                                                    Eng(a_addon), a_node, kKeyTexture, a_slot,
+                                                    a_value, true);
+                return;
+            }
+            SetString value{ a_value };
+            g_override->AddArmorOverride(a_refr, a_female, a_armor, a_addon, a_node, kKeyTexture,
+                                         a_slot, value);
+        }
+
+        void DropArmor(TESObjectREFR* a_refr, bool a_female, TESObjectARMO* a_armor,
+                       TESObjectARMA* a_addon, const char* a_node, std::uint8_t a_slot) {
+            if (g_legacy) {
+                NiOverrideLegacy::RemoveOverride(Eng(a_refr), a_female, Eng(a_armor), Eng(a_addon),
+                                                 a_node, kKeyTexture, a_slot);
+                return;
+            }
+            g_override->RemoveArmorOverride(a_refr, a_female, a_armor, a_addon, a_node,
+                                            kKeyTexture, a_slot);
+        }
+
+        // Straight onto the worn shape, stored nowhere, both persons. ⚠ ONE
+        // CALL ON 0.4.16 because its SetArmorAddonProperty visits the first-
+        // and third-person addon itself; the header's SetArmorProperty takes
+        // one person and is called twice.
+        void PaintArmor(TESObjectREFR* a_refr, bool a_female, TESObjectARMO* a_armor,
+                        TESObjectARMA* a_addon, const char* a_node, std::uint8_t a_slot,
+                        const std::string& a_value) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddOverrideString(Eng(a_refr), a_female, Eng(a_armor),
+                                                    Eng(a_addon), a_node, kKeyTexture, a_slot,
+                                                    a_value, false);
+                return;
+            }
+            SetString value{ a_value };
+            g_override->SetArmorProperty(a_refr, false, a_armor, a_addon, a_node, kKeyTexture,
+                                         a_slot, value, false);
+            g_override->SetArmorProperty(a_refr, true, a_armor, a_addon, a_node, kKeyTexture,
+                                         a_slot, value, false);
+        }
+
+        // Apply what skee stores for one attaching addon, deferred. ⚠ 0.4.16
+        // HAS NO PER-ADDON NATIVE, so it re-applies the whole actor's armour
+        // overrides, also deferred: the tasks run after the attach has put the
+        // addon on the biped, which is when they can find it.
+        void ApplyArmorTo(TESObjectREFR* a_refr, TESObjectARMO* a_armor, TESObjectARMA* a_addon,
+                          NiAVObject* a_object) {
+            if (g_legacy) {
+                NiOverrideLegacy::ApplyOverrides(Eng(a_refr));
+                return;
+            }
+            g_override->ApplyArmorOverrides(a_refr, a_armor, a_addon, a_object, false);
+        }
+
+        void PushArmor(TESObjectREFR* a_refr) {
+            if (g_legacy) {
+                NiOverrideLegacy::ApplyOverrides(Eng(a_refr));
+                return;
+            }
+            g_override->SetArmorProperties(a_refr, false);
+        }
+
+        [[nodiscard]] bool HasNode(TESObjectREFR* a_refr, bool a_female, const char* a_node,
+                                   std::uint8_t a_slot) {
+            if (g_legacy) {
+                return NiOverrideLegacy::HasNodeOverride(Eng(a_refr), a_female, a_node, kKeyTexture,
+                                                         a_slot);
+            }
+            return g_override->HasNodeOverride(a_refr, a_female, a_node, kKeyTexture, a_slot);
+        }
+
+        void PutNode(TESObjectREFR* a_refr, bool a_female, const char* a_node, std::uint8_t a_slot,
+                     const std::string& a_value) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddNodeOverrideString(Eng(a_refr), a_female, a_node, kKeyTexture,
+                                                        a_slot, a_value, true);
+                return;
+            }
+            SetString value{ a_value };
+            g_override->AddNodeOverride(a_refr, a_female, a_node, kKeyTexture, a_slot, value);
+        }
+
+        // Straight onto the node, stored nowhere: SetNodeProperty(refr, third
+        // person, ..., deferred). ⚠ 0.4.16's form needs the sex to match, which
+        // is why it takes a_female where the header's call does not.
+        void PaintNode(TESObjectREFR* a_refr, bool a_female, const char* a_node,
+                       std::uint8_t a_slot, const std::string& a_value) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddNodeOverrideString(Eng(a_refr), a_female, a_node, kKeyTexture,
+                                                        a_slot, a_value, false);
+                return;
+            }
+            SetString value{ a_value };
+            g_override->SetNodeProperty(a_refr, false, a_node, kKeyTexture, a_slot, value, false);
+        }
+
+        void DropNode(TESObjectREFR* a_refr, bool a_female, const char* a_node,
+                      std::uint8_t a_slot) {
+            if (g_legacy) {
+                NiOverrideLegacy::RemoveNodeOverride(Eng(a_refr), a_female, a_node, kKeyTexture,
+                                                     a_slot);
+                return;
+            }
+            g_override->RemoveNodeOverride(a_refr, a_female, a_node, kKeyTexture, a_slot);
+        }
 
         // ---- form identity, the same guard HairColor::Describe carries -------
         //
@@ -270,13 +432,10 @@ namespace OS::SkinApi {
                         // whatever it holds before this observer ran, so an
                         // override it holds is on the shape already, and one it
                         // does not hold is missing whatever the record says.
-                        if (g_override->HasArmorOverride(refr, female, armor, addon,
-                                                         key.c_str(), kKeyTexture, slot)) {
+                        if (HasArmor(refr, female, armor, addon, key.c_str(), slot)) {
                             continue;
                         }
-                        SetString value{ match };
-                        g_override->AddArmorOverride(refr, female, armor, addon, key.c_str(),
-                                                     kKeyTexture, slot, value);
+                        PutArmor(refr, female, armor, addon, key.c_str(), slot, match);
                         ++added;
                         fresh.push_back(SkinPlan::Written{ armorRef->mod, armorRef->local,
                                                            addonRef->mod, addonRef->local, key,
@@ -305,7 +464,7 @@ namespace OS::SkinApi {
             // immediate path loads the texture on the spot; the deferred one
             // queues its own task per value, which is what its own OnAttach
             // does with g_immediateArmor off.
-            g_override->ApplyArmorOverrides(refr, armor, addon, AsRaceMenuObject(a_object), false);
+            ApplyArmorTo(refr, armor, addon, AsRaceMenuObject(a_object));
             return added;
         }
 
@@ -413,8 +572,7 @@ namespace OS::SkinApi {
                         }
                         continue;
                     }
-                    if (!g_override->HasNodeOverride(refr, female, name.c_str(), kKeyTexture,
-                                                     slot)) {
+                    if (!HasNode(refr, female, name.c_str(), slot)) {
                         ++added;
                         // The path the slot shows at the moment it is first
                         // written IS the original, exactly as the body's rows
@@ -429,17 +587,13 @@ namespace OS::SkinApi {
                     // Siren. A hold must be refreshed by every writer of what
                     // it holds; the guard above now only decides whether the
                     // ORIGINAL is worth recording.
-                    SetString value{ match };
-                    g_override->AddNodeOverride(refr, female, name.c_str(), kKeyTexture,
-                                                slot, value);
+                    PutNode(refr, female, name.c_str(), slot, match);
                     // ⚠ DEFERRED: skee queues one task per value, the same
                     // path its own load-time apply takes. Painting a value that
                     // is already on the shape reloads a texture the engine's
                     // cache already holds, which is the cost of not knowing
                     // whether a rebuild just happened.
-                    SetString paint{ match };
-                    g_override->SetNodeProperty(refr, false, name.c_str(), kKeyTexture, slot,
-                                                paint, false);
+                    PaintNode(refr, female, name.c_str(), slot, match);
                     ++painted;
                 }
             }
@@ -590,8 +744,7 @@ namespace OS::SkinApi {
                     if (match.empty()) {
                         continue;
                     }
-                    if (!g_override->HasNodeOverride(refr, female, name.c_str(), kKeyTexture,
-                                                     slot)) {
+                    if (!HasNode(refr, female, name.c_str(), slot)) {
                         ++added;
                         // The path the slot shows the first time it is written
                         // IS the original, exactly as the armour and head rows
@@ -601,12 +754,8 @@ namespace OS::SkinApi {
                     // Refreshed on every write, for PaintHead's 00:53 reason:
                     // a store that keeps the first pack hands it back at the
                     // next re-bind.
-                    SetString value{ match };
-                    g_override->AddNodeOverride(refr, female, name.c_str(), kKeyTexture,
-                                                slot, value);
-                    SetString paint{ match };
-                    g_override->SetNodeProperty(refr, false, name.c_str(), kKeyTexture, slot,
-                                                paint, false);
+                    PutNode(refr, female, name.c_str(), slot, match);
+                    PaintNode(refr, female, name.c_str(), slot, match);
                     ++painted;
                 }
             }
@@ -639,7 +788,10 @@ namespace OS::SkinApi {
             void OnAttach(TESObjectREFR* a_refr, TESObjectARMO* a_armor, TESObjectARMA* a_addon,
                           NiAVObject* a_object, bool /*a_isFirstPerson*/, NiNode* /*a_skeleton*/,
                           NiNode* /*a_root*/) override {
-                if (!a_refr || !a_armor || !a_addon || !a_object || !g_override) {
+                // ⚠ Available AND NOT JUST THE POINTER: on RaceMenu SE 0.4.16 the
+                // observer is registered at kPostPostLoad and the natives it
+                // writes through only resolve at kDataLoaded.
+                if (!a_refr || !a_armor || !a_addon || !a_object || !g_override || !Available()) {
                     return;
                 }
                 auto* const ref   = reinterpret_cast<RE::TESObjectREFR*>(a_refr);
@@ -704,13 +856,8 @@ namespace OS::SkinApi {
                         if (w.original.empty()) {
                             continue;
                         }
-                        g_override->RemoveArmorOverride(refr, female, armor, addon, w.node.c_str(),
-                                                        kKeyTexture, w.slot);
-                        SetString original{ w.original };
-                        g_override->SetArmorProperty(refr, false, armor, addon, w.node.c_str(),
-                                                     kKeyTexture, w.slot, original, false);
-                        g_override->SetArmorProperty(refr, true, armor, addon, w.node.c_str(),
-                                                     kKeyTexture, w.slot, original, false);
+                        DropArmor(refr, female, armor, addon, w.node.c_str(), w.slot);
+                        PaintArmor(refr, female, armor, addon, w.node.c_str(), w.slot, w.original);
                     }
                     spdlog::info("SkinApi: '{}' attach of {:08X}/{:08X}: {} slot(s) put back to "
                                  "the file they had before a skin was cleared while this piece "
@@ -907,15 +1054,13 @@ namespace OS::SkinApi {
                 const auto  fate =
                     SkinPlan::FateOf(pack, w, worn.contains(PairKey(armorForm, addonForm)));
                 if (fate == SkinPlan::RowFate::Move) {
-                    SetString value{ SkinPlan::Match(*pack, w.original) };
-                    g_override->AddArmorOverride(refr, female, armor, addon, w.node.c_str(),
-                                                 kKeyTexture, w.slot, value);
+                    PutArmor(refr, female, armor, addon, w.node.c_str(), w.slot,
+                             SkinPlan::Match(*pack, w.original));
                     kept.push_back(w);
                     ++moved;
                     continue;
                 }
-                g_override->RemoveArmorOverride(refr, female, armor, addon, w.node.c_str(),
-                                                kKeyTexture, w.slot);
+                DropArmor(refr, female, armor, addon, w.node.c_str(), w.slot);
                 if (fate == SkinPlan::RowFate::Hold) {
                     // The addon is off the actor, so there is no shape to write
                     // the original onto and no honest way to say the row is
@@ -934,11 +1079,7 @@ namespace OS::SkinApi {
                 // A no-op when the addon is not attached, which is the right
                 // answer: the next attach loads the file the NIF names.
                 if (!w.original.empty()) {
-                    SetString original{ w.original };
-                    g_override->SetArmorProperty(refr, false, armor, addon, w.node.c_str(),
-                                                 kKeyTexture, w.slot, original, false);
-                    g_override->SetArmorProperty(refr, true, armor, addon, w.node.c_str(),
-                                                 kKeyTexture, w.slot, original, false);
+                    PaintArmor(refr, female, armor, addon, w.node.c_str(), w.slot, w.original);
                 }
             }
             // 1b. The head rows, the same three ways: to the new pack's file of
@@ -966,18 +1107,14 @@ namespace OS::SkinApi {
                     const auto fate =
                         SkinPlan::FateOf(pack, h.original, liveNames.contains(h.node));
                     if (fate == SkinPlan::RowFate::Move) {
-                        SetString value{ SkinPlan::Match(*pack, h.original) };
-                        g_override->AddNodeOverride(refr, female, h.node.c_str(), kKeyTexture,
-                                                    h.slot, value);
-                        SetString paint{ SkinPlan::Match(*pack, h.original) };
-                        g_override->SetNodeProperty(refr, false, h.node.c_str(), kKeyTexture,
-                                                    h.slot, paint, false);
+                        const auto file = SkinPlan::Match(*pack, h.original);
+                        PutNode(refr, female, h.node.c_str(), h.slot, file);
+                        PaintNode(refr, female, h.node.c_str(), h.slot, file);
                         kept_.push_back(h);
                         ++a_moved;
                         continue;
                     }
-                    g_override->RemoveNodeOverride(refr, female, h.node.c_str(), kKeyTexture,
-                                                   h.slot);
+                    DropNode(refr, female, h.node.c_str(), h.slot);
                     if (fate == SkinPlan::RowFate::Hold) {
                         // The geometry is not on the actor, so the original has
                         // nothing to be written onto and the row is all that
@@ -989,9 +1126,7 @@ namespace OS::SkinApi {
                     }
                     ++a_removed;
                     if (!h.original.empty()) {
-                        SetString original{ h.original };
-                        g_override->SetNodeProperty(refr, false, h.node.c_str(), kKeyTexture,
-                                                    h.slot, original, false);
+                        PaintNode(refr, female, h.node.c_str(), h.slot, h.original);
                     }
                 }
                 return kept_;
@@ -1017,7 +1152,7 @@ namespace OS::SkinApi {
             // Push every stored armour override the actor has onto what is
             // worn, which is how the moved ones land.
             if (moved != 0) {
-                g_override->SetArmorProperties(refr, false);
+                PushArmor(refr);
             }
 
             // 2. Whatever the new pack has that nothing was written for yet, on
@@ -1470,6 +1605,27 @@ namespace OS::SkinApi {
                          "could tell this mod when a body attaches.");
             return;
         }
+        // ⚠⚠ Override v1 WITH ActorUpdateManager v0 IS RaceMenu SE 0.4.16, the
+        // one older build measured, and only that pair is taken down the
+        // NiOverride road. The observer goes in now through 0.4.16's own slot
+        // 3 (the attach hook is what paints a newly worn piece, and it needs no
+        // VM); the overrides it writes need the natives, so the status stays
+        // kTooOld - and the observer stays quiet - until ResolveLegacy runs at
+        // kDataLoaded.
+        if (overrides->GetVersion() == 1 && updates->GetVersion() == 0) {
+            g_override = overrides;
+            g_updates  = updates;
+            g_legacy   = true;
+            g_status   = Status::kTooOld;
+            if (!g_observing) {
+                reinterpret_cast<LegacyActorUpdateManager*>(updates)->AddInterface(&g_observer);
+                g_observing = true;
+            }
+            spdlog::info("SkinApi: RaceMenu Override v1 / ActorUpdateManager v0 (RaceMenu SE "
+                         "0.4.16); attach observer registered, overrides go through NiOverride's "
+                         "natives once resolved at kDataLoaded.");
+            return;
+        }
         // The armour override calls are v1 of the Override interface and the
         // observer registration is v1 of the update manager; the floor is the
         // one OverlayApi already holds the same object to.
@@ -1491,6 +1647,19 @@ namespace OS::SkinApi {
         spdlog::info("SkinApi: RaceMenu Override v{} and ActorUpdateManager v{} acquired; attach "
                      "observer registered.",
                      overrides->GetVersion(), updates->GetVersion());
+    }
+
+    void ResolveLegacy() {
+        if (!g_legacy || g_status == Status::kReady) {
+            return;
+        }
+        if (!NiOverrideLegacy::Resolve()) {
+            spdlog::error("SkinApi: RaceMenu SE 0.4.16's NiOverride natives could not be "
+                          "resolved, so the skin changer stays off.");
+            return;
+        }
+        g_status = Status::kReady;
+        spdlog::info("SkinApi: ready through NiOverride (RaceMenu SE 0.4.16).");
     }
 
     Status GetStatus() { return g_status; }
@@ -1577,7 +1746,7 @@ namespace OS::SkinApi {
     }  // namespace
 
     bool ApplyFaceTintFile(RE::Actor* a_actor, const std::string& a_path) {
-        if (!a_actor || a_path.empty() || !g_override) {
+        if (!a_actor || a_path.empty() || !g_override || !Available()) {
             return false;
         }
         auto* const face = FaceNodeOf(a_actor);
@@ -1592,12 +1761,8 @@ namespace OS::SkinApi {
         auto* const refr   = AsRaceMenuRef(a_actor);
         const bool  female = IsFemaleActor(a_actor);
         for (const auto& name : nodes) {
-            SetString value{ a_path };
-            g_override->AddNodeOverride(refr, female, name.c_str(), kKeyTexture,
-                                        kSlotFaceTintComposite, value);
-            SetString paint{ a_path };
-            g_override->SetNodeProperty(refr, false, name.c_str(), kKeyTexture,
-                                        kSlotFaceTintComposite, paint, false);
+            PutNode(refr, female, name.c_str(), kSlotFaceTintComposite, a_path);
+            PaintNode(refr, female, name.c_str(), kSlotFaceTintComposite, a_path);
         }
         // Once at info so a field log can say the seam fired at all, then
         // debug: this runs after every head build for as long as a look with a
@@ -1619,7 +1784,7 @@ namespace OS::SkinApi {
     }
 
     void ClearFaceTintFile(RE::Actor* a_actor) {
-        if (!a_actor || !g_override) {
+        if (!a_actor || !g_override || !Available()) {
             return;
         }
         auto* const face = FaceNodeOf(a_actor);
@@ -1631,8 +1796,7 @@ namespace OS::SkinApi {
         auto* const refr   = AsRaceMenuRef(a_actor);
         const bool  female = IsFemaleActor(a_actor);
         for (const auto& name : nodes) {
-            g_override->RemoveNodeOverride(refr, female, name.c_str(), kKeyTexture,
-                                           kSlotFaceTintComposite);
+            DropNode(refr, female, name.c_str(), kSlotFaceTintComposite);
         }
     }
 

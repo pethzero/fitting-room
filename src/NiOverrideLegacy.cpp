@@ -54,6 +54,20 @@ namespace OS::NiOverrideLegacy {
         using FnRemoveNode    = void (*)(Tag, Refr, bool, SkseFixedString, U32, U32);
         using FnApplyNode     = void (*)(Tag, Refr);
 
+        using Armo = RE::TESObjectARMO*;
+        using Arma = RE::TESObjectARMA*;
+        using FnHasArmor       = bool (*)(Tag, Refr, bool, Armo, Arma, SkseFixedString, U32, U32);
+        using FnAddArmorString = void (*)(Tag, Refr, bool, Armo, Arma, SkseFixedString, U32, U32,
+                                          SkseFixedString, bool);
+        using FnRemoveArmor    = void (*)(Tag, Refr, bool, Armo, Arma, SkseFixedString, U32, U32);
+        using FnApplyArmor     = void (*)(Tag, Refr);
+
+        using FnHasScale    = bool (*)(Tag, Refr, bool, bool, SkseFixedString, SkseFixedString);
+        using FnAddScale    = void (*)(Tag, Refr, bool, bool, SkseFixedString, SkseFixedString, float);
+        using FnGetScale    = float (*)(Tag, Refr, bool, bool, SkseFixedString, SkseFixedString);
+        using FnRemoveScale = bool (*)(Tag, Refr, bool, bool, SkseFixedString, SkseFixedString);
+        using FnUpdateAll   = void (*)(Tag, Refr);
+
         struct Natives {
             FnHasOverlays   hasOverlays{ nullptr };
             FnAddOverlays   addOverlays{ nullptr };
@@ -70,6 +84,17 @@ namespace OS::NiOverrideLegacy {
             FnGetNodeFloat  getFloat{ nullptr };
             FnRemoveNode    removeNode{ nullptr };
             FnApplyNode     applyNode{ nullptr };
+
+            FnHasArmor       hasArmor{ nullptr };
+            FnAddArmorString addArmorString{ nullptr };
+            FnRemoveArmor    removeArmor{ nullptr };
+            FnApplyArmor     applyArmor{ nullptr };
+
+            FnHasScale    hasScale{ nullptr };
+            FnAddScale    addScale{ nullptr };
+            FnGetScale    getScale{ nullptr };
+            FnRemoveScale removeScale{ nullptr };
+            FnUpdateAll   updateAll{ nullptr };
         };
 
         Natives           g_natives;
@@ -165,6 +190,15 @@ namespace OS::NiOverrideLegacy {
             { "GetNodeOverrideFloat", 5, Slot(found.getFloat) },
             { "RemoveNodeOverride", 5, Slot(found.removeNode) },
             { "ApplyNodeOverrides", 1, Slot(found.applyNode) },
+            { "HasOverride", 7, Slot(found.hasArmor) },
+            { "AddOverrideString", 9, Slot(found.addArmorString) },
+            { "RemoveOverride", 7, Slot(found.removeArmor) },
+            { "ApplyOverrides", 1, Slot(found.applyArmor) },
+            { "HasNodeTransformScale", 5, Slot(found.hasScale) },
+            { "AddNodeTransformScale", 6, Slot(found.addScale) },
+            { "GetNodeTransformScale", 5, Slot(found.getScale) },
+            { "RemoveNodeTransformScale", 5, Slot(found.removeScale) },
+            { "UpdateAllReferenceTransforms", 1, Slot(found.updateAll) },
         };
 
         const auto* funcs = type->GetGlobalFuncIter();
@@ -233,14 +267,14 @@ namespace OS::NiOverrideLegacy {
 
     void AddNodeOverrideString(RE::TESObjectREFR* a_refr, bool a_female, const char* a_node,
                                std::uint32_t a_key, std::uint32_t a_index,
-                               const std::string& a_value) {
+                               const std::string& a_value, bool a_persist) {
         if (!Ready() || !a_refr || !a_node) {
             return;
         }
         const RE::BSFixedString node{ a_node };
         const RE::BSFixedString value{ a_value };
         g_natives.addString(nullptr, a_refr, a_female, Pass(node), a_key, a_index, Pass(value),
-                            true);
+                            a_persist);
     }
 
     void AddNodeOverrideInt(RE::TESObjectREFR* a_refr, bool a_female, const char* a_node,
@@ -301,6 +335,92 @@ namespace OS::NiOverrideLegacy {
     void ApplyNodeOverrides(RE::TESObjectREFR* a_refr) {
         if (Ready() && a_refr) {
             g_natives.applyNode(nullptr, a_refr);
+        }
+    }
+
+    bool HasOverride(RE::TESObjectREFR* a_refr, bool a_female, RE::TESObjectARMO* a_armor,
+                     RE::TESObjectARMA* a_addon, const char* a_node, std::uint32_t a_key,
+                     std::uint32_t a_index) {
+        if (!Ready() || !a_refr || !a_armor || !a_addon || !a_node) {
+            return false;
+        }
+        const RE::BSFixedString node{ a_node };
+        return g_natives.hasArmor(nullptr, a_refr, a_female, a_armor, a_addon, Pass(node), a_key,
+                                  a_index);
+    }
+
+    void AddOverrideString(RE::TESObjectREFR* a_refr, bool a_female, RE::TESObjectARMO* a_armor,
+                           RE::TESObjectARMA* a_addon, const char* a_node, std::uint32_t a_key,
+                           std::uint32_t a_index, const std::string& a_value, bool a_persist) {
+        if (!Ready() || !a_refr || !a_armor || !a_addon || !a_node) {
+            return;
+        }
+        const RE::BSFixedString node{ a_node };
+        const RE::BSFixedString value{ a_value };
+        g_natives.addArmorString(nullptr, a_refr, a_female, a_armor, a_addon, Pass(node), a_key,
+                                 a_index, Pass(value), a_persist);
+    }
+
+    void RemoveOverride(RE::TESObjectREFR* a_refr, bool a_female, RE::TESObjectARMO* a_armor,
+                        RE::TESObjectARMA* a_addon, const char* a_node, std::uint32_t a_key,
+                        std::uint32_t a_index) {
+        if (!Ready() || !a_refr || !a_armor || !a_addon || !a_node) {
+            return;
+        }
+        const RE::BSFixedString node{ a_node };
+        g_natives.removeArmor(nullptr, a_refr, a_female, a_armor, a_addon, Pass(node), a_key,
+                              a_index);
+    }
+
+    void ApplyOverrides(RE::TESObjectREFR* a_refr) {
+        if (Ready() && a_refr) {
+            g_natives.applyArmor(nullptr, a_refr);
+        }
+    }
+
+    bool HasNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson, bool a_female,
+                               const char* a_node, const char* a_key) {
+        if (!Ready() || !a_refr || !a_node || !a_key) {
+            return false;
+        }
+        const RE::BSFixedString node{ a_node };
+        const RE::BSFixedString key{ a_key };
+        return g_natives.hasScale(nullptr, a_refr, a_firstPerson, a_female, Pass(node), Pass(key));
+    }
+
+    void AddNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson, bool a_female,
+                               const char* a_node, const char* a_key, float a_scale) {
+        if (!Ready() || !a_refr || !a_node || !a_key) {
+            return;
+        }
+        const RE::BSFixedString node{ a_node };
+        const RE::BSFixedString key{ a_key };
+        g_natives.addScale(nullptr, a_refr, a_firstPerson, a_female, Pass(node), Pass(key), a_scale);
+    }
+
+    float GetNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson, bool a_female,
+                                const char* a_node, const char* a_key) {
+        if (!Ready() || !a_refr || !a_node || !a_key) {
+            return 0.0f;
+        }
+        const RE::BSFixedString node{ a_node };
+        const RE::BSFixedString key{ a_key };
+        return g_natives.getScale(nullptr, a_refr, a_firstPerson, a_female, Pass(node), Pass(key));
+    }
+
+    void RemoveNodeTransformScale(RE::TESObjectREFR* a_refr, bool a_firstPerson, bool a_female,
+                                  const char* a_node, const char* a_key) {
+        if (!Ready() || !a_refr || !a_node || !a_key) {
+            return;
+        }
+        const RE::BSFixedString node{ a_node };
+        const RE::BSFixedString key{ a_key };
+        g_natives.removeScale(nullptr, a_refr, a_firstPerson, a_female, Pass(node), Pass(key));
+    }
+
+    void UpdateAllReferenceTransforms(RE::TESObjectREFR* a_refr) {
+        if (Ready() && a_refr) {
+            g_natives.updateAll(nullptr, a_refr);
         }
     }
 
