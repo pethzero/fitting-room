@@ -2,6 +2,7 @@
 
 #include "MakeupApi.h"  // ArmDelayedFaceRebake: a layer write provokes the re-bind
 
+#include "NiOverrideLegacy.h"  // RaceMenu SE 0.4.16: Overlay/Override v1 go through NiOverride
 #include "OverlayBake.h"   // OS-209: the bake a moved layer's path names, and the probe
 #include "OverlayBaseline.h"  // every write is recorded so a load can put it back
 #include "OverlayReconcile.h"  // OS-233: NoteFaceInstall, the repair's trigger
@@ -29,10 +30,24 @@ namespace OS::OverlayApi {
         IOverrideInterface* g_override{ nullptr };
         Status              g_status{ Status::kNotRequested };
 
+        // ⚠⚠ RaceMenu SE 0.4.16 (Skyrim SE 1.5.97) ANSWERS WITH OVERLAY v1 AND
+        // OVERRIDE v1, AND THEIR VTABLES ARE NOT THE ONES IN THE HEADER. Past
+        // GetVersion (slot 1, shared with IPluginInterface) nothing on g_overlay
+        // or g_override may be called while this is set; every call goes to
+        // NiOverrideLegacy instead, which is RaceMenu's own Papyrus natives.
+        // See NiOverrideLegacy.h for the measurement. The pointers are still
+        // kept, as the "acquired" signal the rest of the file tests.
+        bool g_legacy{ false };
+
         std::vector<OverlayPlan::Layer> g_layers;
 
         [[nodiscard]] TESObjectREFR* AsRaceMenuRef(RE::Actor* a_actor) {
             return reinterpret_cast<TESObjectREFR*>(a_actor);
+        }
+
+        // The same bridge, back to the engine type NiOverrideLegacy takes.
+        [[nodiscard]] RE::TESObjectREFR* AsEngineRef(TESObjectREFR* a_refr) {
+            return reinterpret_cast<RE::TESObjectREFR*>(a_refr);
         }
 
         // OS-226 stage S0: skee's own install callback, and the only place
@@ -165,24 +180,136 @@ namespace OS::OverlayApi {
         // nothing.
         void PutString(TESObjectREFR* a_refr, bool a_female, const char* a_node,
                        std::uint16_t a_key, std::uint8_t a_slot, const std::string& a_value) {
+            const auto index = OverlayPlan::IndexFor(a_key, a_slot);
+            if (g_legacy) {
+                NiOverrideLegacy::AddNodeOverrideString(AsEngineRef(a_refr), a_female, a_node,
+                                                        a_key, index, a_value);
+                return;
+            }
             SetString value{ a_value };
-            g_override->AddNodeOverride(a_refr, a_female, a_node, a_key,
-                                        OverlayPlan::IndexFor(a_key, a_slot), value);
+            g_override->AddNodeOverride(a_refr, a_female, a_node, a_key, index, value);
+        }
+
+        // The numeric writes. ⚠ THE INDEX RULE IS APPLIED BY THE CALLER here,
+        // exactly as the AddNodeOverride calls these replace did.
+        void PutInt(TESObjectREFR* a_refr, bool a_female, const char* a_node,
+                    std::uint16_t a_key, std::uint8_t a_index, skee_i32 a_value) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddNodeOverrideInt(AsEngineRef(a_refr), a_female, a_node, a_key,
+                                                     a_index, static_cast<std::uint32_t>(a_value));
+                return;
+            }
+            SetInt value{ a_value };
+            g_override->AddNodeOverride(a_refr, a_female, a_node, a_key, a_index, value);
+        }
+
+        void PutFloat(TESObjectREFR* a_refr, bool a_female, const char* a_node,
+                      std::uint16_t a_key, std::uint8_t a_index, float a_value) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddNodeOverrideFloat(AsEngineRef(a_refr), a_female, a_node,
+                                                       a_key, a_index, a_value);
+                return;
+            }
+            SetFloat value{ a_value };
+            g_override->AddNodeOverride(a_refr, a_female, a_node, a_key, a_index, value);
         }
 
         void Drop(TESObjectREFR* a_refr, bool a_female, const char* a_node,
                   std::uint16_t a_key, std::uint8_t a_slot) {
-            g_override->RemoveNodeOverride(a_refr, a_female, a_node, a_key,
-                                           OverlayPlan::IndexFor(a_key, a_slot));
+            const auto index = OverlayPlan::IndexFor(a_key, a_slot);
+            if (g_legacy) {
+                NiOverrideLegacy::RemoveNodeOverride(AsEngineRef(a_refr), a_female, a_node, a_key,
+                                                     index);
+                return;
+            }
+            g_override->RemoveNodeOverride(a_refr, a_female, a_node, a_key, index);
         }
 
         [[nodiscard]] bool Fetch(TESObjectREFR* a_refr, bool a_female, const char* a_node,
                                  std::uint16_t a_key, std::uint8_t a_slot, Reader& a_out) {
-            return g_override->GetNodeOverride(a_refr, a_female, a_node, a_key,
-                                               OverlayPlan::IndexFor(a_key, a_slot), a_out);
+            const auto index = OverlayPlan::IndexFor(a_key, a_slot);
+            if (g_legacy) {
+                // ⚠ THE NATIVES ARE TYPED BY THE ASKER, NOT BY THE STORE, so the
+                // type the visitor would have reported is rebuilt: a non-empty
+                // string read means the store holds a string (skee unpacks any
+                // other type to ""), and otherwise the value is a number, which
+                // skee converts between int and float the way RaceMenu does.
+                auto* const refr = AsEngineRef(a_refr);
+                if (!NiOverrideLegacy::HasNodeOverride(refr, a_female, a_node, a_key, index)) {
+                    return false;
+                }
+                a_out.s         = NiOverrideLegacy::GetNodeOverrideString(refr, a_female, a_node,
+                                                                          a_key, index);
+                a_out.gotString = !a_out.s.empty();
+                if (!a_out.gotString) {
+                    a_out.i = static_cast<skee_i32>(
+                        NiOverrideLegacy::GetNodeOverrideInt(refr, a_female, a_node, a_key, index));
+                    a_out.f = NiOverrideLegacy::GetNodeOverrideFloat(refr, a_female, a_node, a_key,
+                                                                     index);
+                    a_out.gotInt   = true;
+                    a_out.gotFloat = true;
+                }
+                return true;
+            }
+            return g_override->GetNodeOverride(a_refr, a_female, a_node, a_key, index, a_out);
+        }
+
+        // SetNodeProperties(refr, false): every stored node override, re-applied
+        // deferred.
+        void PushAll(TESObjectREFR* a_refr) {
+            if (g_legacy) {
+                NiOverrideLegacy::ApplyNodeOverrides(AsEngineRef(a_refr));
+                return;
+            }
+            g_override->SetNodeProperties(a_refr, false);
+        }
+
+        [[nodiscard]] bool HasOverlaysOn(TESObjectREFR* a_refr) {
+            return g_legacy ? NiOverrideLegacy::HasOverlays(AsEngineRef(a_refr))
+                            : g_overlay->HasOverlays(a_refr);
+        }
+
+        // ⚠ BOTH FORMS DEFER: v2 through its flag, v1 because its AddOverlays
+        // only queues the install tasks (skee 87a5cad OverlayInterface.cpp).
+        void AddOverlaysOn(TESObjectREFR* a_refr) {
+            if (g_legacy) {
+                NiOverrideLegacy::AddOverlays(AsEngineRef(a_refr));
+                return;
+            }
+            g_overlay->AddOverlays(a_refr, true);
+        }
+
+        void BuildLegacyLayerList() {
+            // ⚠ v1 HAS NO GetOverlayFormat, so the names are skee 0.4.16's own
+            // FACE_NODE/BODY_NODE/HAND_NODE/FEET_NODE (OverlayInterface.h),
+            // written in the "{}" form OverlayPlan::NodeName takes; the same
+            // four strings are in the shipped skee64.dll. The counts are the
+            // ones skee read from skee64.ini, asked through NiOverride.
+            OverlayPlan::Formats formats;
+            OverlayPlan::Counts  counts{};
+            using OverlayPlan::Location;
+            formats[OverlayPlan::Slot(Location::kFace)]  = "Face [Ovl{}]";
+            formats[OverlayPlan::Slot(Location::kBody)]  = "Body [Ovl{}]";
+            formats[OverlayPlan::Slot(Location::kHands)] = "Hands [Ovl{}]";
+            formats[OverlayPlan::Slot(Location::kFeet)]  = "Feet [Ovl{}]";
+            counts[OverlayPlan::Slot(Location::kFace)]   = NiOverrideLegacy::NumFaceOverlays();
+            counts[OverlayPlan::Slot(Location::kBody)]   = NiOverrideLegacy::NumBodyOverlays();
+            counts[OverlayPlan::Slot(Location::kHands)]  = NiOverrideLegacy::NumHandOverlays();
+            counts[OverlayPlan::Slot(Location::kFeet)]   = NiOverrideLegacy::NumFeetOverlays();
+            g_layers = OverlayPlan::BuildLayers(formats, counts);
+            spdlog::info("Overlays: {} layers through NiOverride (face {}, body {}, hands {}, "
+                         "feet {}).",
+                         g_layers.size(), counts[OverlayPlan::Slot(Location::kFace)],
+                         counts[OverlayPlan::Slot(Location::kBody)],
+                         counts[OverlayPlan::Slot(Location::kHands)],
+                         counts[OverlayPlan::Slot(Location::kFeet)]);
         }
 
         void BuildLayerList() {
+            if (g_legacy) {
+                BuildLegacyLayerList();
+                return;
+            }
             OverlayPlan::Formats formats;
             OverlayPlan::Counts  counts{};
             for (const auto& info : OverlayPlan::kLocations) {
@@ -250,6 +377,23 @@ namespace OS::OverlayApi {
 
         const auto overlayVersion  = overlay->GetVersion();
         const auto overrideVersion = overrides->GetVersion();
+        // ⚠⚠ EXACTLY v1/v1 IS RaceMenu SE 0.4.16, AND ONLY THAT PAIR IS TAKEN
+        // DOWN THE NiOverride ROAD. It is the one older build measured (see
+        // NiOverrideLegacy.h); anything else below v2 is still refused. The
+        // natives need the Papyrus VM, which is not up at kPostPostLoad, so the
+        // status stays kTooOld until ResolveLegacy turns it into kReady at
+        // kDataLoaded - and stays kTooOld, with the message it already has, if
+        // that fails.
+        if (overlayVersion == 1 && overrideVersion == 1) {
+            g_overlay  = overlay;
+            g_override = overrides;
+            g_legacy   = true;
+            g_status   = Status::kTooOld;
+            spdlog::info("Overlays: RaceMenu Overlay v1 / Override v1 (RaceMenu SE 0.4.16). The "
+                         "page will go through NiOverride's natives instead; resolved at "
+                         "kDataLoaded.");
+            return;
+        }
         if (overlayVersion < IOverlayInterface::kCurrentPluginVersion ||
             overrideVersion < IOverrideInterface::kCurrentPluginVersion) {
             g_status = Status::kTooOld;
@@ -308,12 +452,40 @@ namespace OS::OverlayApi {
         if (!Available()) {
             return;
         }
+        // ⚠ v1 HAS NO INSTALL CALLBACK at all (RegisterInstallCallback is not
+        // in skee64 0.4.16), so OverlayReconcile's trigger never fires there.
+        // Said once so a missing repair on SE reads as this and not as a bug.
+        if (g_legacy) {
+            spdlog::info("Overlays: RaceMenu SE 0.4.16 has no install callback, so "
+                         "OverlayReconcile is not armed on this runtime.");
+            return;
+        }
         const bool registered =
             g_overlay->RegisterInstallCallback("FittingRoom", &OnOverlayInstalled);
         spdlog::info("Overlays: RegisterInstallCallback(\"FittingRoom\") returned {}. That says "
                      "the call was accepted and says nothing about whether the callback will "
                      "ever fire; OverlayReconcile arms off its Face fires.",
                      registered);
+    }
+
+    void ResolveLegacy() {
+        if (!g_legacy || g_status == Status::kReady) {
+            return;
+        }
+        if (!NiOverrideLegacy::Resolve()) {
+            spdlog::error("Overlays: RaceMenu SE 0.4.16's NiOverride natives could not be "
+                          "resolved, so the page stays off.");
+            return;
+        }
+        BuildLayerList();
+        if (g_layers.empty()) {
+            g_status = Status::kOverlaysDisabled;
+            spdlog::warn("Overlays: RaceMenu reports no overlay slots at all; overlays are "
+                         "switched off in skee64.ini.");
+            return;
+        }
+        g_status = Status::kReady;
+        spdlog::info("Overlays: ready through NiOverride (RaceMenu SE 0.4.16).");
     }
 
     Status GetStatus() { return g_status; }
@@ -330,7 +502,7 @@ namespace OS::OverlayApi {
         if (!Available() || !a_actor) {
             return false;
         }
-        return g_overlay->HasOverlays(AsRaceMenuRef(a_actor));
+        return HasOverlaysOn(AsRaceMenuRef(a_actor));
     }
 
     void Install(RE::Actor* a_actor) {
@@ -349,14 +521,14 @@ namespace OS::OverlayApi {
                 return;
             }
             auto* const refr = AsRaceMenuRef(actor);
-            if (g_overlay->HasOverlays(refr)) {
+            if (HasOverlaysOn(refr)) {
                 return;
             }
             // ⚠ DEFERRED, NOT IMMEDIATE. This clones the skin geometry once per
             // slot, which on the reference rig is fifteen clones, and the whole
             // point of being on the game thread is not to hold it for all of
             // them. skee's own installer defers for the same reason.
-            g_overlay->AddOverlays(refr, true);
+            AddOverlaysOn(refr);
             spdlog::info("Overlays: installed slots on '{}'.",
                          actor->GetName() ? actor->GetName() : "(unnamed)");
         });
@@ -495,15 +667,13 @@ namespace OS::OverlayApi {
                 const auto packedTint = OverlayPlan::PackTint(
                     state.tint.r, state.tint.g, state.tint.b,
                     OverlayPlan::AlphaByte(OverlayPlan::ClampAlpha(state.alpha)));
-                SetInt tint{ static_cast<skee_i32>(packedTint) };
-                g_override->AddNodeOverride(
-                    refr, female, node.c_str(), OverlayPlan::kKeyTint,
-                    OverlayPlan::IndexFor(OverlayPlan::kKeyTint, 0), tint);
+                PutInt(refr, female, node.c_str(), OverlayPlan::kKeyTint,
+                       OverlayPlan::IndexFor(OverlayPlan::kKeyTint, 0),
+                       static_cast<skee_i32>(packedTint));
 
-                SetFloat alpha{ OverlayPlan::ClampAlpha(state.alpha) };
-                g_override->AddNodeOverride(
-                    refr, female, node.c_str(), OverlayPlan::kKeyAlpha,
-                    OverlayPlan::IndexFor(OverlayPlan::kKeyAlpha, 0), alpha);
+                PutFloat(refr, female, node.c_str(), OverlayPlan::kKeyAlpha,
+                         OverlayPlan::IndexFor(OverlayPlan::kKeyAlpha, 0),
+                         OverlayPlan::ClampAlpha(state.alpha));
 
                 // ⚠⚠ THE GLOW IS ITS OWN COLOUR AND IT IS WRITTEN ON EVERY LAYER,
                 // AND THIS IS WHY A BLACK OVERLAY CAME OUT WHITE. Field, 2026-08-16:
@@ -534,15 +704,13 @@ namespace OS::OverlayApi {
                 const auto glowAlpha  = OverlayPlan::GlowAlphaByte(state.glowStrength);
                 const auto packedGlow = OverlayPlan::PackTint(state.glow.r, state.glow.g,
                                                               state.glow.b, glowAlpha);
-                SetInt     emissive{ static_cast<skee_i32>(packedGlow) };
-                g_override->AddNodeOverride(
-                    refr, female, node.c_str(), OverlayPlan::kKeyEmissiveColour,
-                    OverlayPlan::IndexFor(OverlayPlan::kKeyEmissiveColour, 0), emissive);
+                PutInt(refr, female, node.c_str(), OverlayPlan::kKeyEmissiveColour,
+                       OverlayPlan::IndexFor(OverlayPlan::kKeyEmissiveColour, 0),
+                       static_cast<skee_i32>(packedGlow));
 
-                SetFloat multiple{ OverlayPlan::ClampGlow(state.glowStrength) };
-                g_override->AddNodeOverride(
-                    refr, female, node.c_str(), OverlayPlan::kKeyEmissiveMultiple,
-                    OverlayPlan::IndexFor(OverlayPlan::kKeyEmissiveMultiple, 0), multiple);
+                PutFloat(refr, female, node.c_str(), OverlayPlan::kKeyEmissiveMultiple,
+                         OverlayPlan::IndexFor(OverlayPlan::kKeyEmissiveMultiple, 0),
+                         OverlayPlan::ClampGlow(state.glowStrength));
 
                 // ⚠⚠ THE FINISH IS DROPPED WHEN IT IS OFF, NOT WRITTEN AT THE
                 // DEFAULT, AND THAT IS DELIBERATELY THE OPPOSITE OF THE GLOW
@@ -594,15 +762,13 @@ namespace OS::OverlayApi {
                 }
 
                 if (state.hasFinish) {
-                    SetFloat gloss{ OverlayPlan::ClampGloss(state.gloss) };
-                    g_override->AddNodeOverride(
-                        refr, female, node.c_str(), OverlayPlan::kKeyGloss,
-                        OverlayPlan::IndexFor(OverlayPlan::kKeyGloss, 0), gloss);
+                    PutFloat(refr, female, node.c_str(), OverlayPlan::kKeyGloss,
+                             OverlayPlan::IndexFor(OverlayPlan::kKeyGloss, 0),
+                             OverlayPlan::ClampGloss(state.gloss));
 
-                    SetFloat specular{ OverlayPlan::ClampSpecular(state.specular) };
-                    g_override->AddNodeOverride(
-                        refr, female, node.c_str(), OverlayPlan::kKeySpecular,
-                        OverlayPlan::IndexFor(OverlayPlan::kKeySpecular, 0), specular);
+                    PutFloat(refr, female, node.c_str(), OverlayPlan::kKeySpecular,
+                             OverlayPlan::IndexFor(OverlayPlan::kKeySpecular, 0),
+                             OverlayPlan::ClampSpecular(state.specular));
                 } else {
                     Drop(refr, female, node.c_str(), OverlayPlan::kKeyGloss,
                          OverlayPlan::kSlotDiffuse);
@@ -620,7 +786,7 @@ namespace OS::OverlayApi {
                 // docs/handoffs/2026-08-16-makeup-tint-masks-measured.md. An
                 // immediate apply costs a scenegraph walk inside the write and buys
                 // the feature nothing.
-                g_override->SetNodeProperties(refr, false);
+                PushAll(refr);
                 // ⚠⚠ AND THIS IS THE EDIT THE FIELD CAUGHT TAKING THE FACE
                 // AWAY. Writing a layer makes skee re-apply this actor's node
                 // overrides, and one of the overrides it holds for the head is
@@ -730,7 +896,7 @@ namespace OS::OverlayApi {
                       OverlayPlan::kSlotDiffuse,
                       std::string{ OverlayPlan::kDefaultTexture });
 
-            g_override->SetNodeProperties(refr, false);
+            PushAll(refr);
         });
     }
 
@@ -817,7 +983,7 @@ namespace OS::OverlayApi {
             if (!actor || !g_override) {
                 return;
             }
-            g_override->SetNodeProperties(AsRaceMenuRef(actor), false);
+            PushAll(AsRaceMenuRef(actor));
         });
     }
 

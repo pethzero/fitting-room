@@ -1000,6 +1000,10 @@ namespace {
                 // rather than beside OverlayApi::Request because Request runs at
                 // kPostPostLoad, before Settings::Load, and the probe half asks
                 // an INI question.
+                // RaceMenu SE 0.4.16 first: its Overlays path is NiOverride's
+                // natives, which need the VM that is up by now and was not at
+                // kPostPostLoad.
+                OS::OverlayApi::ResolveLegacy();
                 OS::OverlayApi::RegisterInstallCallback();
                 // Author rule packs (Data/SKSE/Plugins/FittingRoom/Rules/*.json),
                 // read before WorldWatch::Init() starts evaluating so the very
